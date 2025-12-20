@@ -9,14 +9,13 @@ import VIPModal from './components/VIPModal';
 import EditProfileModal from './components/EditProfileModal';
 import BagModal from './components/BagModal';
 import CreateRoomModal from './components/CreateRoomModal';
-import MiniPlayer from './components/MiniPlayer';
 import GlobalBanner from './components/GlobalBanner';
 import AdminPanel from './components/AdminPanel';
 import { DEFAULT_VIP_LEVELS, DEFAULT_GIFTS, DEFAULT_STORE_ITEMS } from './constants';
 import { Room, User, VIPPackage, UserLevel, Gift, StoreItem, GameSettings, GlobalAnnouncement } from './types';
 import { AnimatePresence, motion } from 'framer-motion';
 import { db } from './services/firebase';
-import { collection, onSnapshot, doc, setDoc, query, orderBy, limit, addDoc, getDoc, deleteDoc, serverTimestamp } from 'firebase/firestore';
+import { collection, onSnapshot, doc, setDoc, query, orderBy, addDoc, getDoc, serverTimestamp } from 'firebase/firestore';
 
 export default function App() {
   const [initializing, setInitializing] = useState(true);
@@ -32,8 +31,8 @@ export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [users, setUsers] = useState<User[]>([]);
   const [rooms, setRooms] = useState<Room[]>([]); 
-  const [gifts, setGifts] = useState<Gift[]>([]); // تبدأ فارغة لتُحمل من السيرفر
-  const [storeItems, setStoreItems] = useState<StoreItem[]>([]); // تبدأ فارغة لتُحمل من السيرفر
+  const [gifts, setGifts] = useState<Gift[]>([]);
+  const [storeItems, setStoreItems] = useState<StoreItem[]>([]);
   const [vipLevels, setVipLevels] = useState<VIPPackage[]>(DEFAULT_VIP_LEVELS);
   const [announcement, setAnnouncement] = useState<GlobalAnnouncement | null>(null);
   const [appBanner, setAppBanner] = useState('');
@@ -58,7 +57,6 @@ export default function App() {
       setShowInstallBtn(true);
     });
 
-    // 1. استماع لإعدادات التطبيق والبنر
     const unsubSettings = onSnapshot(doc(db, 'appSettings', 'global'), (docSnap) => {
       if (docSnap.exists()) {
         const data = docSnap.data();
@@ -67,51 +65,46 @@ export default function App() {
       }
     });
 
-    // 2. استماع للمستخدمين (للتوب والترتيب)
     const unsubUsers = onSnapshot(collection(db, 'users'), (snapshot) => {
         const usersData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as User));
         setUsers(usersData);
+        // تحديث بيانات المستخدم الحالي إذا تغيرت في القاعدة
+        if (user) {
+          const currentInDb = usersData.find(u => u.id === user.id);
+          if (currentInDb) setUser(currentInDb);
+        }
     });
 
-    // 3. استماع للغرف الحقيقية فقط
     const qRooms = query(collection(db, 'rooms'), orderBy('listeners', 'desc'));
     const unsubRooms = onSnapshot(qRooms, (snapshot) => {
       const roomsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Room));
       setRooms(roomsData);
+      // تحديث بيانات الغرفة الحالية لضمان تزامن المقاعد والكاريزما
+      if (currentRoom) {
+        const updatedCurrent = roomsData.find(r => r.id === currentRoom.id);
+        if (updatedCurrent) setCurrentRoom(updatedCurrent);
+      }
     });
 
-    // 4. استماع للهدايا المرفوعة على السيرفر (الحقيقية)
     const unsubGifts = onSnapshot(doc(db, 'appSettings', 'gifts'), (docSnap) => {
-      if (docSnap.exists()) {
-        setGifts(docSnap.data().gifts || DEFAULT_GIFTS);
-      } else {
-        setGifts(DEFAULT_GIFTS);
-      }
+      if (docSnap.exists()) setGifts(docSnap.data().gifts || DEFAULT_GIFTS);
+      else setGifts(DEFAULT_GIFTS);
     });
 
-    // 5. استماع للمتجر الحقيقي
     const unsubStore = onSnapshot(doc(db, 'appSettings', 'store'), (docSnap) => {
-      if (docSnap.exists()) {
-        setStoreItems(docSnap.data().items || DEFAULT_STORE_ITEMS);
-      } else {
-        setStoreItems(DEFAULT_STORE_ITEMS);
-      }
+      if (docSnap.exists()) setStoreItems(docSnap.data().items || DEFAULT_STORE_ITEMS);
+      else setStoreItems(DEFAULT_STORE_ITEMS);
     });
 
-    // 6. استماع لمستويات الـ VIP الحقيقية
     const unsubVip = onSnapshot(doc(db, 'appSettings', 'vip'), (docSnap) => {
-      if (docSnap.exists()) {
-        setVipLevels(docSnap.data().levels || DEFAULT_VIP_LEVELS);
-      }
+      if (docSnap.exists()) setVipLevels(docSnap.data().levels || DEFAULT_VIP_LEVELS);
     });
 
     const savedUser = localStorage.getItem('voice_chat_user');
     if (savedUser) {
       const parsedUser = JSON.parse(savedUser);
       getDoc(doc(db, 'users', parsedUser.id)).then((docSnap) => {
-        if (docSnap.exists()) {
-          setUser(docSnap.data() as User);
-        }
+        if (docSnap.exists()) setUser(docSnap.data() as User);
       });
     }
     
@@ -119,7 +112,7 @@ export default function App() {
     return () => {
       unsubSettings(); unsubRooms(); unsubUsers(); unsubGifts(); unsubStore(); unsubVip();
     };
-  }, []);
+  }, [user?.id, currentRoom?.id]);
 
   const handleInstallApp = async () => {
     if (!deferredPrompt) return;
@@ -128,10 +121,6 @@ export default function App() {
     if (outcome === 'accepted') setShowInstallBtn(false);
     setDeferredPrompt(null);
   };
-
-  const topContributors = useMemo(() => {
-    return [...users].filter(u => (u.wealth || 0) > 0).sort((a, b) => (b.wealth || 0) - (a.wealth || 0)).slice(0, 10);
-  }, [users]);
 
   const handleAuth = async (userData: User) => {
     setUser(userData);
@@ -149,26 +138,34 @@ export default function App() {
 
   const handleCreateRoom = async (roomData: any) => {
     if (!user) return;
-    const newRoom = { ...roomData, hostId: user.id, listeners: 1, speakers: [{ ...user, seatIndex: 0 }], createdAt: serverTimestamp() };
+    const newRoom = { ...roomData, hostId: user.id, listeners: 1, speakers: [{ ...user, seatIndex: 0, charm: 0 }], createdAt: serverTimestamp() };
     await addDoc(collection(db, 'rooms'), newRoom);
-    addToast("تم إنشاء الغرفة بنجاح! 🎙️", "success");
+    addToast("تم إنشاء الغرفة بنجاح!", "success");
     setShowCreateRoomModal(false);
   };
 
   const handleUpdateUser = async (updatedData: Partial<User>) => {
     if (!user) return;
-    const newUser = { ...user, ...updatedData };
-    setUser(newUser);
-    localStorage.setItem('voice_chat_user', JSON.stringify(newUser));
     await setDoc(doc(db, 'users', user.id), updatedData, { merge: true });
   };
 
   const handleRoomJoin = (room: Room) => {
     setCurrentRoom(room);
     setIsRoomMinimized(false);
+    // تحديث عدد المستمعين في القاعدة
+    handleUpdateRoom(room.id, { listeners: (room.listeners || 0) + 1 });
   };
 
-  const handleRoomLeave = () => {
+  const handleRoomLeave = async () => {
+    if (!currentRoom || !user) return;
+    
+    // إزالة المستخدم من المقاعد فوراً عند الخروج
+    const updatedSpeakers = (currentRoom.speakers || []).filter(s => s.id !== user.id);
+    await setDoc(doc(db, 'rooms', currentRoom.id), { 
+      speakers: updatedSpeakers,
+      listeners: Math.max(0, (currentRoom.listeners || 1) - 1)
+    }, { merge: true });
+
     setCurrentRoom(null);
     setIsRoomMinimized(false);
   };
@@ -204,7 +201,7 @@ export default function App() {
            <div className="mt-2 space-y-3">
               <div className="px-4">
                  <div className="relative w-full h-28 rounded-2xl overflow-hidden shadow-lg border border-white/10 bg-slate-800">
-                   {appBanner && <img src={appBanner} className="w-full h-full object-cover" alt="Banner" />}
+                   {appBanner ? <img src={appBanner} className="w-full h-full object-cover" alt="Banner" /> : <div className="w-full h-full bg-slate-800 animate-pulse"></div>}
                  </div>
               </div>
 
@@ -214,10 +211,10 @@ export default function App() {
                  </div>
                  <div className="bg-slate-900/50 p-2 rounded-xl border border-white/5 backdrop-blur-sm overflow-x-auto">
                    <div className="flex gap-3 min-w-max">
-                     {topContributors.map((contributor, idx) => (
+                     {[...users].filter(u => (u.wealth || 0) > 0).sort((a, b) => (b.wealth || 0) - (a.wealth || 0)).slice(0, 10).map((contributor, idx) => (
                        <div key={contributor.id} className="flex flex-col items-center gap-1 min-w-[60px]">
                          <div className="relative">
-                           <div className={`w-12 h-12 rounded-full p-[2px] ${idx === 0 ? 'bg-gradient-to-tr from-yellow-300 to-yellow-600 shadow-lg shadow-amber-500/20' : 'bg-slate-700'}`}>
+                           <div className={`w-12 h-12 rounded-full p-[2px] ${idx === 0 ? 'bg-gradient-to-tr from-yellow-300 to-yellow-600' : 'bg-slate-700'}`}>
                              <img src={contributor.avatar} className="w-full h-full rounded-full object-cover border-2 border-slate-900" alt={contributor.name} />
                            </div>
                          </div>
@@ -236,7 +233,7 @@ export default function App() {
                    {rooms.map(room => (
                      <RoomCard key={room.id} room={room} onClick={handleRoomJoin} />
                    ))}
-                   {rooms.length === 0 && <div className="text-center text-slate-500 py-10 text-xs">لا توجد غرف حقيقية حالياً</div>}
+                   {rooms.length === 0 && <div className="text-center text-slate-500 py-10 text-xs">لا توجد غرف نشطة حالياً</div>}
                  </div>
               </div>
            </div>
@@ -262,13 +259,13 @@ export default function App() {
                  </div>
 
                  {showInstallBtn && (
-                    <motion.div initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} className="mb-8 p-6 bg-gradient-to-br from-indigo-600 via-blue-700 to-indigo-900 rounded-[2.5rem] border border-white/20 shadow-2xl relative overflow-hidden">
+                    <div className="mb-8 p-6 bg-gradient-to-br from-indigo-600 via-blue-700 to-indigo-900 rounded-[2.5rem] border border-white/20 shadow-2xl relative overflow-hidden">
                       <div className="absolute top-0 right-0 p-4 opacity-10"><Smartphone size={80} /></div>
                       <h3 className="text-lg font-black text-white mb-1">نسخة الجوال متوفرة!</h3>
                       <button onClick={handleInstallApp} className="w-full bg-white text-indigo-700 p-4 rounded-2xl flex items-center justify-center gap-3 font-black text-sm shadow-xl active:scale-95">
                         <Download size={20} /> تثبيت التطبيق الآن
                       </button>
-                    </motion.div>
+                    </div>
                  )}
 
                  <div className="bg-gradient-to-r from-slate-800 to-slate-900 p-4 rounded-2xl border border-white/5 mb-6 flex justify-between items-center">
@@ -287,7 +284,6 @@ export default function App() {
                     <div onClick={() => setShowBagModal(true)} className="flex items-center justify-between p-4 border-b border-white/5 hover:bg-white/5 cursor-pointer">
                       <div className="flex items-center gap-3"><ShoppingBag size={18} className="text-blue-500" /><span className="text-sm font-medium text-white">المتجر والحقيبة</span></div>
                     </div>
-                    {/* إعادة زر مركز الـ VIP */}
                     <div onClick={() => setShowVIPModal(true)} className="flex items-center justify-between p-4 border-b border-white/5 hover:bg-white/5 cursor-pointer">
                       <div className="flex items-center gap-3"><Crown size={18} className="text-amber-500" /><span className="text-sm font-medium text-white">عضوية الـ VIP</span></div>
                     </div>

@@ -1,6 +1,6 @@
 
 {
-  "short_name": "بـوبـو",
+  "short_name": "بـوبـو لايف",
   "name": "Bobo-Live: صوت العرب",
   "description": "منصة الدردشة الصوتية العربية الأحدث بميزات تفاعلية وألعاب.",
   "icons": [
@@ -19,10 +19,11 @@
   ],
   "screenshots": [
     {
-      "src": "https://img.freepik.com/free-vector/modern-mobile-app-ui-ux-design-template_52683-50075.jpg",
+      "src": "https://img.freepik.com/free-vector/gradient-music-festival-twitch-banner_23-2149051838.jpg",
       "sizes": "1080x1920",
       "type": "image/jpg",
-      "form_factor": "narrow"
+      "form_factor": "narrow",
+      "label": "واجهة بوبو لايف الرئيسية"
     }
   ],
   "start_url": "/",
