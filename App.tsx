@@ -10,12 +10,16 @@ import EditProfileModal from './components/EditProfileModal';
 import BagModal from './components/BagModal';
 import CreateRoomModal from './components/CreateRoomModal';
 import GlobalBanner from './components/GlobalBanner';
+import GlobalLuckyBagBanner from './components/GlobalLuckyBagBanner';
 import AdminPanel from './components/AdminPanel';
+import MiniPlayer from './components/MiniPlayer';
+import PrivateChatModal from './components/PrivateChatModal';
 import { DEFAULT_VIP_LEVELS, DEFAULT_GIFTS, DEFAULT_STORE_ITEMS } from './constants';
-import { Room, User, VIPPackage, UserLevel, Gift, StoreItem, GameSettings, GlobalAnnouncement } from './types';
+import { Room, User, VIPPackage, UserLevel, Gift, StoreItem, GameSettings, GlobalAnnouncement, LuckyBag } from './types';
 import { AnimatePresence, motion } from 'framer-motion';
-import { db } from './services/firebase';
-import { collection, onSnapshot, doc, setDoc, query, orderBy, addDoc, getDoc, serverTimestamp } from 'firebase/firestore';
+import { db, auth } from './services/firebase';
+import { collection, onSnapshot, doc, setDoc, query, orderBy, addDoc, getDoc, serverTimestamp, deleteDoc, updateDoc, arrayUnion, arrayRemove, increment, limit, where } from 'firebase/firestore';
+import { deleteUser, signOut } from 'firebase/auth';
 
 export default function App() {
   const [initializing, setInitializing] = useState(true);
@@ -35,7 +39,11 @@ export default function App() {
   const [storeItems, setStoreItems] = useState<StoreItem[]>([]);
   const [vipLevels, setVipLevels] = useState<VIPPackage[]>(DEFAULT_VIP_LEVELS);
   const [announcement, setAnnouncement] = useState<GlobalAnnouncement | null>(null);
+  const [globalLuckyBag, setGlobalLuckyBag] = useState<LuckyBag | null>(null);
   const [appBanner, setAppBanner] = useState('');
+
+  // Private Chat State
+  const [privateChatPartner, setPrivateChatPartner] = useState<User | null>(null);
 
   const [gameSettings, setGameSettings] = useState<GameSettings>({
      slotsWinRate: 35, wheelWinRate: 45, luckyGiftWinRate: 30, luckyGiftRefundPercent: 200, luckyXEnabled: true,
@@ -68,10 +76,16 @@ export default function App() {
     const unsubUsers = onSnapshot(collection(db, 'users'), (snapshot) => {
         const usersData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as User));
         setUsers(usersData);
-        // تحديث بيانات المستخدم الحالي إذا تغيرت في القاعدة
         if (user) {
           const currentInDb = usersData.find(u => u.id === user.id);
-          if (currentInDb) setUser(currentInDb);
+          if (currentInDb) {
+            if (currentInDb.isBanned) {
+              addToast("عذراً، لقد تم حظر حسابك من قبل الإدارة", "error");
+              handleLogout();
+            } else {
+              setUser(currentInDb);
+            }
+          }
         }
     });
 
@@ -79,11 +93,28 @@ export default function App() {
     const unsubRooms = onSnapshot(qRooms, (snapshot) => {
       const roomsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Room));
       setRooms(roomsData);
-      // تحديث بيانات الغرفة الحالية لضمان تزامن المقاعد والكاريزما
       if (currentRoom) {
         const updatedCurrent = roomsData.find(r => r.id === currentRoom.id);
         if (updatedCurrent) setCurrentRoom(updatedCurrent);
+        else {
+          setCurrentRoom(null);
+          setIsRoomMinimized(false);
+        }
       }
+    });
+
+    // Listen for Global Lucky Bags
+    const qBags = query(collection(db, 'lucky_bags'), orderBy('createdAt', 'desc'), limit(1));
+    const unsubBags = onSnapshot(qBags, (snapshot) => {
+       if (!snapshot.empty) {
+          const bagData = { id: snapshot.docs[0].id, ...snapshot.docs[0].data() } as LuckyBag;
+          const now = Date.now();
+          const bagTime = bagData.createdAt?.toMillis() || now;
+          if (now - bagTime < 60000) {
+            setGlobalLuckyBag(bagData);
+            setTimeout(() => setGlobalLuckyBag(null), 15000); 
+          }
+       }
     });
 
     const unsubGifts = onSnapshot(doc(db, 'appSettings', 'gifts'), (docSnap) => {
@@ -110,9 +141,38 @@ export default function App() {
     
     setInitializing(false);
     return () => {
-      unsubSettings(); unsubRooms(); unsubUsers(); unsubGifts(); unsubStore(); unsubVip();
+      unsubSettings(); unsubRooms(); unsubUsers(); unsubGifts(); unsubStore(); unsubVip(); unsubBags();
     };
   }, [user?.id, currentRoom?.id]);
+
+  const handleToggleFollow = async (targetId: string) => {
+    if (!user) return;
+    const isFollowing = user.ownedItems?.includes(`follow_${targetId}`);
+    
+    try {
+      const userRef = doc(db, 'users', user.id);
+      const targetRef = doc(db, 'users', targetId);
+
+      if (isFollowing) {
+        await updateDoc(userRef, { 
+          ownedItems: arrayRemove(`follow_${targetId}`),
+          "stats.following": increment(-1)
+        });
+        await updateDoc(targetRef, { "stats.followers": increment(-1) });
+        addToast("تم إلغاء المتابعة", "info");
+      } else {
+        await updateDoc(userRef, { 
+          ownedItems: arrayUnion(`follow_${targetId}`),
+          "stats.following": increment(1)
+        });
+        await updateDoc(targetRef, { "stats.followers": increment(1) });
+        addToast("تمت المتابعة بنجاح", "success");
+      }
+    } catch (err) {
+      console.error(err);
+      addToast("حدث خطأ أثناء المتابعة", "error");
+    }
+  };
 
   const handleInstallApp = async () => {
     if (!deferredPrompt) return;
@@ -127,45 +187,98 @@ export default function App() {
     localStorage.setItem('voice_chat_user', JSON.stringify(userData));
   };
 
-  const handleLogout = () => {
-    if (confirm("هل أنت متأكد من تسجيل الخروج؟")) {
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
       setUser(null); setCurrentRoom(null);
       localStorage.removeItem('voice_chat_user');
       addToast("تم تسجيل الخروج بنجاح", "info");
       setActiveTab('home');
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleDeleteAccount = async () => {
+    if (!user) return;
+    if (confirm("هل أنت متأكد من حذف حسابك نهائياً؟ لا يمكن التراجع عن هذا الإجراء.")) {
+      try {
+        const currentUser = auth.currentUser;
+        if (currentUser) {
+          await deleteDoc(doc(db, 'users', user.id));
+          await deleteUser(currentUser);
+          setUser(null);
+          localStorage.removeItem('voice_chat_user');
+          addToast("تم حذف الحساب نهائياً", "success");
+        }
+      } catch (err: any) {
+        console.error(err);
+        if (err.code === 'auth/requires-recent-login') {
+          addToast("يجب تسجيل الدخول مرة أخرى للقيام بهذا الإجراء الأمني", "error");
+        } else {
+          addToast("فشل حذف الحساب", "error");
+        }
+      }
     }
   };
 
   const handleCreateRoom = async (roomData: any) => {
-    if (!user) return;
-    const newRoom = { ...roomData, hostId: user.id, listeners: 1, speakers: [{ ...user, seatIndex: 0, charm: 0 }], createdAt: serverTimestamp() };
-    await addDoc(collection(db, 'rooms'), newRoom);
-    addToast("تم إنشاء الغرفة بنجاح!", "success");
-    setShowCreateRoomModal(false);
+    if (!user || !user.customId) {
+      addToast("يجب أن تمتلك ID خاص لإنشاء غرفة", "error");
+      return;
+    }
+    
+    // Link Room ID to User Custom ID
+    const roomId = user.customId.toString();
+    const newRoom = { 
+      ...roomData, 
+      id: roomId,
+      hostId: user.id, 
+      listeners: 1, 
+      speakers: [{ ...user, seatIndex: 0, charm: 0 }], 
+      createdAt: serverTimestamp() 
+    };
+
+    try {
+      await setDoc(doc(db, 'rooms', roomId), newRoom);
+      addToast(`تم إنشاء غرفتك بنجاح بالـ ID: ${roomId} ✅`, "success");
+      setShowCreateRoomModal(false);
+    } catch (err) {
+      console.error(err);
+      addToast("فشل إنشاء الغرفة", "error");
+    }
   };
 
   const handleUpdateUser = async (updatedData: Partial<User>) => {
     if (!user) return;
-    await setDoc(doc(db, 'users', user.id), updatedData, { merge: true });
+    const userId = updatedData.id || user.id;
+    await setDoc(doc(db, 'users', userId), updatedData, { merge: true });
   };
 
   const handleRoomJoin = (room: Room) => {
     setCurrentRoom(room);
     setIsRoomMinimized(false);
-    // تحديث عدد المستمعين في القاعدة
     handleUpdateRoom(room.id, { listeners: (room.listeners || 0) + 1 });
+  };
+
+  const handleRoomJoinById = async (roomId: string) => {
+     const roomDoc = await getDoc(doc(db, 'rooms', roomId));
+     if (roomDoc.exists()) {
+        const room = { id: roomDoc.id, ...roomDoc.data() } as Room;
+        handleRoomJoin(room);
+        setGlobalLuckyBag(null);
+     } else {
+        addToast("عذراً، هذه الغرفة لم تعد موجودة", "error");
+     }
   };
 
   const handleRoomLeave = async () => {
     if (!currentRoom || !user) return;
-    
-    // إزالة المستخدم من المقاعد فوراً عند الخروج
     const updatedSpeakers = (currentRoom.speakers || []).filter(s => s.id !== user.id);
     await setDoc(doc(db, 'rooms', currentRoom.id), { 
       speakers: updatedSpeakers,
       listeners: Math.max(0, (currentRoom.listeners || 1) - 1)
     }, { merge: true });
-
     setCurrentRoom(null);
     setIsRoomMinimized(false);
   };
@@ -194,6 +307,15 @@ export default function App() {
       
       <AnimatePresence>
         {announcement && <GlobalBanner announcement={announcement} />}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {globalLuckyBag && (
+           <GlobalLuckyBagBanner 
+              bag={globalLuckyBag} 
+              onJoin={(rid) => handleRoomJoinById(rid)} 
+           />
+        )}
       </AnimatePresence>
 
       <div className="flex-1 overflow-y-auto pb-20 scrollbar-hide">
@@ -287,14 +409,29 @@ export default function App() {
                     <div onClick={() => setShowVIPModal(true)} className="flex items-center justify-between p-4 border-b border-white/5 hover:bg-white/5 cursor-pointer">
                       <div className="flex items-center gap-3"><Crown size={18} className="text-amber-500" /><span className="text-sm font-medium text-white">عضوية الـ VIP</span></div>
                     </div>
-                    <div onClick={handleLogout} className="flex items-center justify-between p-4 hover:bg-red-900/10 cursor-pointer">
+                    <div onClick={handleLogout} className="flex items-center justify-between p-4 border-b border-white/5 hover:bg-red-900/10 cursor-pointer">
                       <div className="flex items-center gap-3"><LogOut size={18} className="text-red-500" /><span className="text-sm font-medium text-red-500">خروج</span></div>
+                    </div>
+                    <div onClick={handleDeleteAccount} className="flex items-center justify-between p-4 hover:bg-red-950/20 cursor-pointer group">
+                      <div className="flex items-center gap-3"><UserX size={18} className="text-red-600 group-hover:scale-110 transition-transform" /><span className="text-sm font-black text-red-600">حذف الحساب نهائياً</span></div>
                     </div>
                  </div>
               </div>
            </div>
         )}
       </div>
+
+      <AnimatePresence>
+        {isRoomMinimized && currentRoom && (
+          <MiniPlayer 
+            room={currentRoom} 
+            onExpand={() => setIsRoomMinimized(false)} 
+            onLeave={handleRoomLeave} 
+            isMuted={isUserMuted} 
+            onToggleMute={() => setIsUserMuted(!isUserMuted)} 
+          />
+        )}
+      </AnimatePresence>
 
       <div className="absolute bottom-0 left-0 right-0 bg-[#0f172a]/95 backdrop-blur-lg border-t border-white/5 flex justify-around items-center h-20 pb-2 z-20">
          <button onClick={() => setActiveTab('home')} className={`flex flex-col items-center gap-1 p-2 w-16 ${activeTab === 'home' ? 'text-amber-400' : 'text-slate-500'}`}><Home size={24} /><span className="text-[10px] font-medium">الرئيسية</span></button>
@@ -307,13 +444,27 @@ export default function App() {
       {showBagModal && user && <BagModal isOpen={showBagModal} onClose={() => setShowBagModal(false)} items={storeItems} user={user} onBuy={(item) => handleUpdateUser({ coins: user.coins - item.price, ownedItems: [...(user.ownedItems || []), item.id] })} onEquip={(item) => handleUpdateUser(item.type === 'frame' ? { frame: item.url } : { activeBubble: item.url })} />}
       {showCreateRoomModal && <CreateRoomModal isOpen={showCreateRoomModal} onClose={() => setShowCreateRoomModal(false)} onCreate={handleCreateRoom} />}
 
-      {currentRoom && (
-        <VoiceRoom 
-           room={currentRoom} currentUser={user!} onUpdateUser={handleUpdateUser} onLeave={handleRoomLeave} onMinimize={() => setIsRoomMinimized(true)} 
-           gifts={gifts} onEditProfile={() => setShowEditProfileModal(true)} gameSettings={gameSettings} onUpdateRoom={handleUpdateRoom} 
-           isMuted={isUserMuted} onToggleMute={() => setIsUserMuted(!isUserMuted)} onAnnouncement={triggerAnnouncement} users={users} setUsers={() => {}}
-        />
-      )}
+      <AnimatePresence>
+        {currentRoom && !isRoomMinimized && (
+          <VoiceRoom 
+             room={currentRoom} currentUser={user!} onUpdateUser={handleUpdateUser} onLeave={handleRoomLeave} onMinimize={() => setIsRoomMinimized(true)} 
+             gifts={gifts} onEditProfile={() => setShowEditProfileModal(true)} gameSettings={gameSettings} onUpdateRoom={handleUpdateRoom} 
+             isMuted={isUserMuted} onToggleMute={() => setIsUserMuted(!isUserMuted)} onAnnouncement={triggerAnnouncement} users={users} setUsers={() => {}}
+             onOpenPrivateChat={(partner) => setPrivateChatPartner(partner)}
+             onToggleFollow={handleToggleFollow}
+          />
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {privateChatPartner && user && (
+          <PrivateChatModal 
+            partner={privateChatPartner}
+            currentUser={user}
+            onClose={() => setPrivateChatPartner(null)}
+          />
+        )}
+      </AnimatePresence>
 
       {showAdminPanel && user && <AdminPanel isOpen={showAdminPanel} onClose={() => setShowAdminPanel(false)} currentUser={user} users={users} onUpdateUser={handleUpdateUser} rooms={rooms} setRooms={() => {}} onUpdateRoom={handleUpdateRoom} gifts={gifts} setGifts={() => {}} storeItems={storeItems} setStoreItems={() => {}} vipLevels={vipLevels} setVipLevels={() => {}} gameSettings={gameSettings} setGameSettings={() => {}} appBanner={appBanner} onUpdateAppBanner={(url) => setAppBanner(url)} />}
     </div>

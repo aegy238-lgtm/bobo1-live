@@ -54,6 +54,21 @@ export interface User {
   agencyBalance?: number;
 }
 
+export interface LuckyBag {
+  id: string;
+  senderId: string;
+  senderName: string;
+  senderAvatar: string;
+  roomId: string;
+  roomTitle: string;
+  totalAmount: number;
+  remainingAmount: number;
+  recipientsLimit: number;
+  claimedBy: string[]; // IDs of users who claimed
+  createdAt: any;
+  expiresAt: any;
+}
+
 export interface GlobalAnnouncement {
   id: string;
   senderName: string;
@@ -62,7 +77,7 @@ export interface GlobalAnnouncement {
   giftIcon: string;
   roomTitle: string;
   roomId: string;
-  type: 'gift' | 'lucky_win';
+  type: 'gift' | 'lucky_win' | 'lucky_bag';
   amount: number;
   timestamp: any;
 }
@@ -114,7 +129,7 @@ export interface Room {
 export interface LuckyMultiplier {
   label: string;
   value: number;
-  chance: number; // Percentage 0-100
+  chance: number; 
 }
 
 export interface GameSettings {
